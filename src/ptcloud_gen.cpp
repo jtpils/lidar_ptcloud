@@ -7,12 +7,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
-#include <signal.h>
 
-HPS3D_HandleTypeDef handle;
-AsyncIObserver_t My_Observer;
-
-ros::Publisher ptcloud_pub;//Global variable, because the observer callback function needs to be used
+ros::Publisher ptcloudL_pub, ptcloudR_pub;//Global variable, because the observer callback function needs to be used
 
 //The observer callback function
 void *User_Func(HPS3D_HandleTypeDef *handle, AsyncIObserver_t *event)
@@ -42,8 +38,19 @@ void *User_Func(HPS3D_HandleTypeDef *handle, AsyncIObserver_t *event)
 					pt.z = event->MeasureData.point_cloud_data[0].point_data[i].z;
 					measureData.points[i] = pt;
 				}
-				ptcloud_pub.publish(measureData);
-				break;
+				//48 49
+				switch (handle->DeviceName[11])
+				{
+				case 48:
+					ptcloudL_pub.publish(measureData);
+					break;
+				case 49:
+					ptcloudR_pub.publish(measureData);
+					break;
+				default:
+					printf("Not ttyACM*!\n");
+					break;
+				}
 			// case SIMPLE_DEPTH_PACKET:
 			// 	printf("distance = %d  event->RetPacketType = %d\n",event->MeasureData.simple_depth_data->distance_average,event->RetPacketType);
 			// 	break;
@@ -83,82 +90,94 @@ int main(int argc, char **argv)
 	uint32_t a = 0;
 	uint8_t fileName[10][20];
 	uint32_t dev_cnt = 0;
+	uint8_t dev[13] = "/dev/ttyACM*";
 	RET_StatusTypeDef ret = RET_OK;
-
-	//Create a topic
-	ptcloud_pub = n.advertise<sensor_msgs::PointCloud>("ptcloud", 1000);	
-
-	//set debug enable and install printf log callback function
-	HPS3D_SetDebugEnable(true);
-	HPS3D_SetDebugFunc(&my_printf);
 
 	//Lists the optional devices
 	dev_cnt = HPS3D_GetDeviceList((uint8_t *)"/dev/",(uint8_t *)"ttyACM",fileName);
 
-	printf("%s\n", fileName[0]);
-	handle.DeviceName = fileName[0];
+	HPS3D_HandleTypeDef handle[dev_cnt];
+	AsyncIObserver_t Observer[dev_cnt];
 
-	//Device Connection
-	ret = HPS3D_Connect(&handle);
-	if(ret != RET_OK)
-	{
-		printf("Device open failed！ret = %d\n",ret);
-		return 1;
-	}
-	
-	//Point Data Setting
-	HPS3D_SetOpticalEnable(&handle, true);
+	//Create a topic
+	ptcloudL_pub = n.advertise<sensor_msgs::PointCloud>("ptcloudL", 1000);
+	ptcloudR_pub = n.advertise<sensor_msgs::PointCloud>("ptcloudR", 1000);
+
+	//set debug enable and install printf log callback function
+	HPS3D_SetDebugEnable(false);
+	HPS3D_SetDebugFunc(&my_printf);
 	HPS3D_SetPointCloudEn(true);
 
-	//Device init
-	ret = HPS3D_ConfigInit(&handle);
-	if(RET_OK != ret)
-	{
-		printf("Initialization failed:%d\n", ret);
-		return 1;
+
+	for (int i = 0; i < dev_cnt; i++){
+		const size_t len = strlen((const char *)fileName[i]);
+		dev[11] = (uint8_t)fileName[i][len-1];
+		handle[i].DeviceName = (uint8_t *) dev;
+		printf("%s\n", handle[i].DeviceName);
+
+		//Device Connection
+		ret = HPS3D_Connect(&(handle[i]));
+		if(ret != RET_OK)
+		{
+			printf("Device open failed！ret = %d\n",ret);
+			return 1;
+		}
+		
+		//Point Data Setting
+		HPS3D_SetOpticalEnable(&(handle[i]), true);
+
+		//Device init
+		ret = HPS3D_ConfigInit(&(handle[i]));
+		if(RET_OK != ret)
+		{
+			printf("Initialization failed:%d\n", ret);
+			return 1;
+		}
+		printf("Initialization succeed\n");
+
+		//Observer callback function and initialization
+		Observer[i].AsyncEvent = ISubject_Event_DataRecvd;
+		Observer[i].NotifyEnable = true;
+		Observer[i].ObserverID = i;
+		Observer[i].RetPacketType = NULL_PACKET;
+
+		handle[i].OutputPacketType = PACKET_FULL;
+		HPS3D_SetPacketType(&(handle[i]));
+
+		//Add observer one
+		HPS3D_AddObserver(&User_Func, &(handle[i]), &(Observer[i]));	
+
+		if(ret != RET_OK)
+		{
+			//Remove device and disconnect
+			HPS3D_RemoveDevice(&(handle[i]));
+			printf("Initialization failed, Remove device\n");
+			return 1;
+		}
+
+		//Set running mode
+		handle[i].SyncMode = ASYNC;
+		handle[i].RunMode = RUN_CONTINUOUS;
+		HPS3D_SetRunMode(&(handle[i]));
 	}
-	printf("Initialization succeed\n");
-
-	//Observer callback function and initialization
-	My_Observer.AsyncEvent = ISubject_Event_DataRecvd;
-	My_Observer.NotifyEnable = true;
-	My_Observer.ObserverID = 0;
-	My_Observer.RetPacketType = NULL_PACKET;
-
-	handle.OutputPacketType = PACKET_FULL;
-	HPS3D_SetPacketType(&handle);
-
-	//Add observer one
-	HPS3D_AddObserver(&User_Func, &handle, &My_Observer);		
-
-	if(ret != RET_OK)
-	{
-		//Remove device and disconnect
-		HPS3D_RemoveDevice(&handle);
-		printf("Initialization failed, Remove device\n");
-		return 1;
-	}
-
-	//Set running mode
-	handle.SyncMode = ASYNC;
-	handle.RunMode = RUN_CONTINUOUS;
-	HPS3D_SetRunMode(&handle);
 
 	while(ros::ok())
 	{		
 
 	}
 
-	if(HPS3D_RemoveDevice(&handle) != RET_OK)
-    {
-		printf("HPS3D_RemoveDevice faild\n");
-    }
-    else
-    {	
-        printf("HPS3D_RemoveDevice succeed\n");
-    }
-	HPS3D_DisConnect(&handle);
-	HPS3D_RemoveObserver(&My_Observer);
+	for (int i = 0; i < dev_cnt; i++){
+		if(HPS3D_RemoveDevice(&(handle[i])) != RET_OK)
+		{
+			printf("HPS3D_RemoveDevice faild\n");
+		}
+		else
+		{	
+			printf("HPS3D_RemoveDevice succeed\n");
+		}
+		HPS3D_DisConnect(&(handle[i]));
+		HPS3D_RemoveObserver(&(Observer[i]));
+	}
 	return 0;
 }
 
