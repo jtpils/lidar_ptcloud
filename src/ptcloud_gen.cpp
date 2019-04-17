@@ -8,7 +8,7 @@
 #include <stdlib.h>
 #include <unistd.h>
 
-ros::Publisher ptcloudL_pub, ptcloudR_pub;//Global variable, because the observer callback function needs to be used
+ros::Publisher ptcloud_pubL, ptcloud_pubR;//Global variable, because the observer callback function needs to be used
 
 //The observer callback function
 void *User_Func(HPS3D_HandleTypeDef *handle, AsyncIObserver_t *event)
@@ -38,19 +38,20 @@ void *User_Func(HPS3D_HandleTypeDef *handle, AsyncIObserver_t *event)
 					pt.z = event->MeasureData.point_cloud_data[0].point_data[i].z;
 					measureData.points[i] = pt;
 				}
-				//48 49
-				switch (handle->DeviceName[11])
-				{
-				case 48:
-					ptcloudL_pub.publish(measureData);
-					break;
-				case 49:
-					ptcloudR_pub.publish(measureData);
-					break;
-				default:
-					printf("Not ttyACM*!\n");
-					break;
+				switch(handle->DeviceAddr){
+					case 48:
+						ptcloud_pubR.publish(measureData);
+						printf("R\n");
+						break;
+					case 49:
+						ptcloud_pubL.publish(measureData);
+						printf("L\n");
+						break;
+					default:
+						printf("Wrong!!\n");
+						break;
 				}
+				break;
 			// case SIMPLE_DEPTH_PACKET:
 			// 	printf("distance = %d  event->RetPacketType = %d\n",event->MeasureData.simple_depth_data->distance_average,event->RetPacketType);
 			// 	break;
@@ -73,6 +74,78 @@ void *User_Func(HPS3D_HandleTypeDef *handle, AsyncIObserver_t *event)
 	}
 }
 
+RET_StatusTypeDef lidar_init(uint8_t *filename, HPS3D_HandleTypeDef *handle, AsyncIObserver_t *observer){
+	RET_StatusTypeDef ret = RET_OK;
+	
+	uint8_t dev[13] = "/dev/ttyACM*";
+	const size_t len = strlen((const char *)filename);
+	dev[11] = (uint8_t)filename[len-1];
+	handle->DeviceName = (uint8_t *) dev;
+	printf("%s\n", handle->DeviceName);
+
+
+	//Device Connection
+	ret = HPS3D_Connect(handle);
+	if(ret != RET_OK)
+	{
+		printf("Device open failed！ret = %d\n",ret);
+	}
+	
+	//Point Data Setting
+	HPS3D_SetOpticalEnable(handle, true);
+	
+	HPS3D_SetDevAddr(handle, dev[11]);
+	HPS3D_GetDevAddr(handle);
+	printf("%d\n", handle->DeviceAddr);
+
+	//Device init
+	ret = HPS3D_ConfigInit(handle);
+	if(RET_OK != ret)
+	{
+		printf("Initialization failed:%d\n", ret);
+	} else {
+		printf("Initialization succeed with DeviceAddr = %d\n", handle->DeviceAddr);
+	}
+	
+	//Observer callback function and initialization
+	observer->AsyncEvent = ISubject_Event_DataRecvd;
+	observer->NotifyEnable = true;
+	observer->ObserverID = dev[11];
+	observer->RetPacketType = NULL_PACKET;
+
+	handle->OutputPacketType = PACKET_FULL;
+	HPS3D_SetPacketType(handle);
+
+	//Add observer one
+	HPS3D_AddObserver(&User_Func, handle, observer);		
+
+	if(ret != RET_OK)
+	{
+		//Remove device and disconnect
+		HPS3D_RemoveDevice(handle);
+		printf("Initialization failed, Remove device\n");
+	}
+
+	//Set running mode
+	handle->SyncMode = ASYNC;
+	handle->RunMode = RUN_CONTINUOUS;
+	HPS3D_SetRunMode(handle);
+
+	return ret;
+}
+
+void lidar_close(HPS3D_HandleTypeDef *handle, AsyncIObserver_t *observer){
+	if(HPS3D_RemoveDevice(handle) != RET_OK){
+		printf("HPS3D_RemoveDevice failed\n");
+	}	else {	
+		printf("HPS3D_RemoveDevice succeed\n");
+	}
+	HPS3D_DisConnect(handle);
+	HPS3D_RemoveObserver(observer);
+
+	handle = NULL;
+	observer = NULL;
+}
 //printf log callback function
 void my_printf(uint8_t *str)
 {
@@ -90,94 +163,29 @@ int main(int argc, char **argv)
 	uint32_t a = 0;
 	uint8_t fileName[10][20];
 	uint32_t dev_cnt = 0;
-	uint8_t dev[13] = "/dev/ttyACM*";
 	RET_StatusTypeDef ret = RET_OK;
-
-	//Lists the optional devices
-	dev_cnt = HPS3D_GetDeviceList((uint8_t *)"/dev/",(uint8_t *)"ttyACM",fileName);
-
-	HPS3D_HandleTypeDef handle[dev_cnt];
-	AsyncIObserver_t Observer[dev_cnt];
+	HPS3D_HandleTypeDef handleL, handleR;
+	AsyncIObserver_t observerL, observerR;
 
 	//Create a topic
-	ptcloudL_pub = n.advertise<sensor_msgs::PointCloud>("ptcloudL", 1000);
-	ptcloudR_pub = n.advertise<sensor_msgs::PointCloud>("ptcloudR", 1000);
+	ptcloud_pubL = n.advertise<sensor_msgs::PointCloud>("ptcloudL", 1000);	
+	ptcloud_pubR = n.advertise<sensor_msgs::PointCloud>("ptcloudR", 1000);	
 
 	//set debug enable and install printf log callback function
 	HPS3D_SetDebugEnable(false);
 	HPS3D_SetDebugFunc(&my_printf);
 	HPS3D_SetPointCloudEn(true);
 
+	//Lists the optional devices
+	dev_cnt = HPS3D_GetDeviceList((uint8_t *)"/dev/",(uint8_t *)"ttyACM",fileName);
+	
+	lidar_init(fileName[0], &handleL, &observerL);
+	// lidar_init(fileName[1], &handleR, &observerR);
 
-	for (int i = 0; i < dev_cnt; i++){
-		const size_t len = strlen((const char *)fileName[i]);
-		dev[11] = (uint8_t)fileName[i][len-1];
-		handle[i].DeviceName = (uint8_t *) dev;
-		printf("%s\n", handle[i].DeviceName);
+	while(ros::ok());
 
-		//Device Connection
-		ret = HPS3D_Connect(&(handle[i]));
-		if(ret != RET_OK)
-		{
-			printf("Device open failed！ret = %d\n",ret);
-			return 1;
-		}
-		
-		//Point Data Setting
-		HPS3D_SetOpticalEnable(&(handle[i]), true);
-
-		//Device init
-		ret = HPS3D_ConfigInit(&(handle[i]));
-		if(RET_OK != ret)
-		{
-			printf("Initialization failed:%d\n", ret);
-			return 1;
-		}
-		printf("Initialization succeed\n");
-
-		//Observer callback function and initialization
-		Observer[i].AsyncEvent = ISubject_Event_DataRecvd;
-		Observer[i].NotifyEnable = true;
-		Observer[i].ObserverID = i;
-		Observer[i].RetPacketType = NULL_PACKET;
-
-		handle[i].OutputPacketType = PACKET_FULL;
-		HPS3D_SetPacketType(&(handle[i]));
-
-		//Add observer one
-		HPS3D_AddObserver(&User_Func, &(handle[i]), &(Observer[i]));	
-
-		if(ret != RET_OK)
-		{
-			//Remove device and disconnect
-			HPS3D_RemoveDevice(&(handle[i]));
-			printf("Initialization failed, Remove device\n");
-			return 1;
-		}
-
-		//Set running mode
-		handle[i].SyncMode = ASYNC;
-		handle[i].RunMode = RUN_CONTINUOUS;
-		HPS3D_SetRunMode(&(handle[i]));
-	}
-
-	while(ros::ok())
-	{		
-
-	}
-
-	for (int i = 0; i < dev_cnt; i++){
-		if(HPS3D_RemoveDevice(&(handle[i])) != RET_OK)
-		{
-			printf("HPS3D_RemoveDevice faild\n");
-		}
-		else
-		{	
-			printf("HPS3D_RemoveDevice succeed\n");
-		}
-		HPS3D_DisConnect(&(handle[i]));
-		HPS3D_RemoveObserver(&(Observer[i]));
-	}
+	lidar_close(&handleL, &observerL);
+	lidar_close(&handleR, &observerR);
 	return 0;
 }
 
